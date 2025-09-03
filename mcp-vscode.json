@@ -1,0 +1,14 @@
+{
+  "servers": {
+    "docs-mcp": {
+      "type": "stdio",
+      "command": "path to venv/Scripts/python.exe",
+      "args": [
+        "path to server/docs_server"
+      ],
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    }
+  }
+}

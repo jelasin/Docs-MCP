@@ -1,0 +1,19 @@
+# 配置嵌入模型（可选）不配置则下载Hugging Face模型本地调用
+# embed_model=text-embedding-3-small
+# embed_model_baseurl=
+# embed_model_apikey=
+
+# 配置 RAG 模型（可选）不配置则只返回检索结果
+# rag_model=gpt-4o
+# rag_model_baseurl=
+# rag_model_apikey=
+
+# Hugging Face 相关配置
+## 模型缓存目录
+hf_cache_dir=models
+## 备用模型
+hf_fallback_model=sentence-transformers/all-MiniLM-L6-v2
+
+# http
+## http_host=0.0.0.0
+## http_port=14578
