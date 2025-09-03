@@ -28,6 +28,7 @@
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+cp model.conf.exp model.conf
 # 首次启动需要运行进行初始化，创建 db，docs目录，和初始向量数据库。
 # scripts 会生成docs_done.txt文件，增量计算需要向量化的文档，避免重复向量化。
 python scripts\index_docs.py --refresh
