@@ -29,6 +29,7 @@ try:
 	from langchain_core.prompts import ChatPromptTemplate  # type: ignore
 	from langchain_core.output_parsers import StrOutputParser  # type: ignore
 	from langchain_core.runnables import RunnablePassthrough  # type: ignore
+	from langchain.chat_models import init_chat_model  # type: ignore
 except Exception:
 	ChatOpenAI = None  # type: ignore
 	OpenAIEmbeddings = None  # type: ignore
@@ -37,6 +38,7 @@ except Exception:
 	ChatPromptTemplate = None  # type: ignore
 	StrOutputParser = None  # type: ignore
 	RunnablePassthrough = None  # type: ignore
+	init_chat_model = None  # type: ignore
 
 try:
 	from fastmcp import FastMCP
@@ -154,9 +156,6 @@ def _get_embed_model_name(conf: Dict[str, Any]) -> str:
 	return conf.get("embed_model") or conf.get("embedding_model") or "sentence-transformers/all-MiniLM-L6-v2"
 
 
-# Note: Low-level collection helper removed; we use LangChain's Chroma wrapper consistently.
-
-
 def _build_langchain_components(conf: Dict[str, Any]):
 	"""Create LangChain embeddings, vectorstore retriever, and LLM based on model.conf.
 
@@ -176,26 +175,66 @@ def _build_langchain_components(conf: Dict[str, Any]):
 		collection_name="docs",
 		persist_directory=DB_DIR,
 		embedding_function=lc_embeddings,
-	).as_retriever(search_kwargs={"k": 5})
+	).as_retriever(search_kwargs={"k": 3})
 
-	# LLM
+	# LLM（带 /v1 回退与健康探测），使用统一的 init_chat_model 接口
 	rag_model = conf.get("rag_model") or "gpt-4o"
-	rag_base = _normalize_base_url(conf.get("rag_model_baseurl") or conf.get("rag_baseurl"))
+	rag_base_raw = _normalize_base_url(conf.get("rag_model_baseurl") or conf.get("rag_baseurl"))
 	rag_key = conf.get("rag_model_apikey") or os.getenv("OPENAI_API_KEY")
-	if ChatOpenAI is None:
-		raise RuntimeError("LangChain OpenAI 依赖未安装")
+	if init_chat_model is None:
+		raise RuntimeError("LangChain init_chat_model 未安装或不可用（请升级 langchain 至支持该接口的版本）")
 	if not rag_key:
 		# 允许无 key 情况下仅返回检索，不做生成
 		llm = None
-	else:
-		llm = ChatOpenAI(
-			model=rag_model,
-			base_url=rag_base,
-			api_key=SecretStr(str(rag_key)),
-			temperature=0,
-		)
+		return retriever, llm
 
-	return retriever, llm
+	def _make_llm(base_url: Optional[str]):
+		# 统一入口，必要时可通过 rag_model_provider 指定提供方（如 openai、anthropic、groq 等）
+		provider = conf.get("rag_model_provider") or None
+		kwargs: Dict[str, Any] = {"model": rag_model, "temperature": 0}
+		if provider:
+			kwargs["model_provider"] = provider
+		if base_url:
+			kwargs["base_url"] = base_url
+		if rag_key:
+			kwargs["api_key"] = str(rag_key)
+		return cast(Any, init_chat_model)(**kwargs)
+
+	def _probe_llm(test_llm):
+		try:
+			_ = test_llm.invoke("healthcheck")
+			return True
+		except Exception:
+			return False
+
+	# 尝试 1：按原始 base_url 构建并探测
+	llm: Optional[Any] = None
+	try_base = rag_base_raw
+	try:
+		cand = _make_llm(try_base)
+		if _probe_llm(cand):
+			llm = cand
+			setattr(llm, "_docs_mcp_rag_endpoint", try_base)
+			setattr(llm, "_docs_mcp_model_name", f"{rag_model} (init_chat_model)")
+			return retriever, llm
+	except Exception:
+		pass
+
+	# 尝试 2：如果 base_url 缺少 /v1，则自动补上并再探测
+	if try_base and not str(try_base).rstrip("/").endswith("v1"):
+		try_v1 = str(try_base).rstrip("/") + "/v1"
+		try:
+			cand2 = _make_llm(try_v1)
+			if _probe_llm(cand2):
+				llm = cand2
+				setattr(llm, "_docs_mcp_rag_endpoint", try_v1)
+				setattr(llm, "_docs_mcp_model_name", f"{rag_model} (init_chat_model)")
+				return retriever, llm
+		except Exception:
+			pass
+
+	# 如果仍失败，抛出异常，让调用方回退为仅检索（并显示错误）
+	raise RuntimeError("RAG LLM 初始化失败：请检查 rag_model_baseurl/baseurl 与 API Key，必要时在地址末尾添加 /v1")
 
 
 def _make_lc_embeddings(conf: Dict[str, Any]):
@@ -548,36 +587,12 @@ def query_docs(
 			try:
 				answer_text = chain.invoke(question)
 				rag_used = True
-				# prefer explicit endpoint from conf if present
-				rrag_endpoint = _normalize_base_url(conf.get("rag_model_baseurl") or conf.get("rag_baseurl"))
+				# 如果 _build_langchain_components 设置了端点，读取它；否则回退配置值
+				endpoint = getattr(llm, "_docs_mcp_rag_endpoint", None)
+				rrag_endpoint = endpoint or _normalize_base_url(conf.get("rag_model_baseurl") or conf.get("rag_baseurl"))
 			except Exception as e1:
-				# One-shot fallback: if base_url missing '/v1', retry with it
-				base_raw = _normalize_base_url(conf.get("rag_model_baseurl") or conf.get("rag_baseurl"))
-				try:
-					if base_raw and not str(base_raw).rstrip("/").endswith("v1"):
-						if ChatOpenAI is not None:
-							llm2 = ChatOpenAI(
-								model=(conf.get("rag_model") or "gpt-4o"),
-								base_url=str(base_raw).rstrip("/") + "/v1",
-								api_key=SecretStr(str(conf.get("rag_model_apikey") or os.getenv("OPENAI_API_KEY") or "")),
-								temperature=0,
-							)
-							chain2 = (
-								{"context": retriever | _format_docs, "question": RunnablePassthrough()}
-								| prompt
-								| llm2
-								| StrOutputParser()
-							)
-							answer_text = chain2.invoke(question)
-							rag_used = True
-							rrag_endpoint = str(base_raw).rstrip("/") + "/v1"
-							err_msg = None
-						else:
-							err_msg = "LangChain OpenAI 依赖未安装"
-					else:
-						err_msg = str(e1)
-				except Exception as e2:
-					err_msg = str(e1) if str(e1) else str(e2)
+				# 将错误记录下来，但不影响检索结果返回
+				err_msg = str(e1)
 		elif llm is None:
 			# LLM 未配置，保持仅检索
 			err_msg = "未配置 rag_model_apikey，已返回检索上下文"
