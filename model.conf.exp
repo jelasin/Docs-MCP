@@ -5,6 +5,7 @@
 
 # 配置 RAG 模型（可选）不配置则只返回检索结果
 # rag_model=gpt-4o
+# rag_model_provider=openai
 # rag_model_baseurl=
 # rag_model_apikey=
 

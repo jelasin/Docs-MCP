@@ -538,7 +538,25 @@ def query_docs(
 	try:
 		pairs = cast(List[Any], vectorstore.similarity_search_with_score(question, k=top_k))
 	except Exception as e:
-		return RagAnswer(question=question, top_k=top_k, rag_used=False, rag_endpoint=None, contexts=[], references=[], answer=None, error=f"检索失败: {e}")
+		msg = str(e)
+		# 友好提示：Chroma 集合的向量维度与当前检索时使用的嵌入模型不一致
+		if "expecting embedding with dimension" in msg and "got" in msg:
+			return RagAnswer(
+				question=question,
+				top_k=top_k,
+				rag_used=False,
+				rag_endpoint=None,
+				contexts=[],
+				references=[],
+				answer=None,
+				error=(
+					f"检索失败（嵌入维度不匹配）: {msg}。请确保索引与检索使用相同的嵌入模型。"
+					"若你刚更换了 embed_model（例如从 HF 384 维切到 OpenAI 1536 维），"
+					"请执行 index_docs(refresh=true) 重新构建向量库；"
+					"或将 model.conf 的 embed_model 改回与当初索引一致的模型后再试。"
+				),
+			)
+		return RagAnswer(question=question, top_k=top_k, rag_used=False, rag_endpoint=None, contexts=[], references=[], answer=None, error=f"检索失败: {msg}")
 	if not pairs:
 		return RagAnswer(question=question, top_k=top_k, rag_used=False, rag_endpoint=None, contexts=[], references=[], answer=None, error="没有检索到相关内容。请先执行 index_docs。")
 
